@@ -1,0 +1,194 @@
+---
+title: "Greeting Behavior as Music"
+format: html
+---
+
+### Welcome to the Lemur Greeting Soundboard!
+
+![](Verreaux's%20sifaka.jpg){fig-align="center" width="393"}
+
+What if you could *hear* social behavior? In this project, I’ve transformed Verreaux’s sifakas’ greeting interactions into personalized ringtones. Greeting is defined as a nose-to-nose contact between two individuals in sifaka. From an exploratory project this semester, I found that greetings may have multiple functions, including signal social status and conflict-reconciliation.
+
+I selected 10 adult sifakas (5 males and 5 females) and used data on the greetings they initiated to generate musical phrases. Each note in a ringtone reflects a single greeting: its pitch is based on the identity of the individual being greeted, and its duration changes depending on the social context. For example, affiliative greetings are longer than agonistic ones. To give each ringtone a signature rhythm, I added background drums: males have slower, deeper beats, while females have faster, higher ones. Together, the melody and rhythm create an acoustic snapshot of each lemur’s social personality.
+
+### Library packages and load in data
+
+```{r}
+library(dplyr)
+library(readxl)
+library(stringr)
+library(tuneR)
+```
+
+```{r}
+greeting <- read_xlsx("greet_adult.xlsx")
+
+set.seed(42) 
+sampled_ids <- greeting %>%
+  distinct(Initiator_Sex, Initiator) %>%
+  group_by(Initiator_Sex) %>% 
+  sample_n(size = 5) %>%
+  pull(Initiator)
+# I filter 5 males and 5 females
+
+df_subset <- greeting %>%
+  filter(Initiator %in% sampled_ids)
+
+df_subset <- df_subset %>%
+  mutate(
+    Context_group_new = case_when(
+      grepl("feed|food", Context, ignore.case = TRUE) ~ "Feeding",
+      Context %in% c("Affiliation", "Play") ~ "Affiliative",
+      Context %in% c("Aggression", "Submissive") ~ "Agonistic",
+      Context %in% c("Forage", "Lick") ~ "Feeding",
+      Context %in% c("Rest", "Autogroom", "Scan") ~ "Resting",
+      Context %in% c("Travel") ~ "Traveling",
+      TRUE ~ "Others"
+    )
+  )
+
+df_subset <- df_subset %>%
+  mutate(
+    receiver_id = as.factor(Receiver),
+    freq = 300 + 50 * as.numeric(receiver_id),
+    dur = case_when(
+      Context_group_new == "Affiliative" ~ 1.0,
+      Context_group_new == "Feeding" ~ 0.8,
+      Context_group_new == "Traveling" ~ 0.6,
+      Context_group_new == "Resting" ~ 0.4,
+      Context_group_new == "Agonistic" ~ 0.2,
+      TRUE ~ 0.1
+    )
+  )
+```
+
+The subset of original data has several new columns. The `freq` (frequency) is determined by converting the `Receiver` identity into a numeric factor and mapping it to a frequency scale starting at 300 Hz, which this gives each greeting a unique pitch based on who it was directed to. The `dur` (duration) is assigned based on the type of social context (`Context_group_new`), with longer durations for affiliative interactions and shorter ones for agonistic or other contexts. Other new context groups include mating, intergroup encounter, and some unambitious labels that needs further examination.
+
+### Functions for generating ringtones
+
+```{r}
+
+sampling_rate <- 44100
+dir.create("ringtones", showWarnings = FALSE)
+
+# function for generating a mute with a specified sample length
+silenceWave <- function(n, samp.rate = 44100, bit = 16) {
+  Wave(left = rep(0, n), samp.rate = samp.rate, bit = bit)
+}
+
+```
+
+-   The the audio sampling rate was set to 44,100 Hz (samples per second), which is the standard sample rate for CD-quality audio.
+
+-   dir.create creates a folder named `"ringtones"` in the current working directory.
+
+-   The silenceWave function creates a chunk of digital silence, which will be used to insert a pause between beats in the following `generate_beat_track()` function.
+
+#### Function for generating notes
+
+```{r}
+generate_note <- function(freq, duration, amp = 10000) {
+  t <- seq(0, duration, by = 1/sampling_rate)
+  Wave(left = amp * sin(2 * pi * freq * t), samp.rate = sampling_rate, bit = 16)
+}
+```
+
+The function is designed to create a simple sine wave representing a musical note.
+
+-   The `freq` parameter determines the pitch of the note in Hertz (Hz), with higher values producing higher-pitched sounds. (I assigned each receiver a different frequency so that the melody reflects who the individual greeted)
+
+-   The `duration` parameter sets how long the note will last in seconds. (It is determined by the context in which the greeting happened)
+
+-   The `amp` parameter controls the amplitude, or loudness, of the sound, with a default value of 10,000 unless otherwise specified.
+
+#### Functions for generating drum beats
+
+```{r}
+generate_beat <- function(freq, duration = 0.15, amp = 6000, decay = 8) {
+  t <- seq(0, duration, by = 1/sampling_rate)
+  waveform <- amp * sin(2 * pi * freq * t) * exp(-decay * t)
+  Wave(left = waveform, samp.rate = sampling_rate, bit = 16)
+}
+```
+
+This function creates a single short percussive sound, like a drum hit.
+
+-   The `freq` parameter sets the pitch of the beat, with lower values producing deeper, bass-like thumps and higher values producing sharper, snare-like clicks. (I assigned the frequency for male initiators as 180 Hz and female initiators as 500 Hz)
+
+-   The `duration` controls how long the beat lasts, with a default of 0.15 seconds.
+
+-   The `amp` sets the volume, and the `decay` parameter controls how quickly the sound fades out, using an exponential decay function to mimic the natural drop-off of a real drum sound.
+
+```{r}
+generate_beat_track <- function(total_duration, interval, freq) {
+  n_beats <- floor(total_duration / interval)
+  beat_wave <- NULL
+  for (i in 1:n_beats) {
+    beat <- generate_beat(freq = freq)
+    silence_len <- round((interval - 0.15) * sampling_rate)
+    beat <- bind(beat, silenceWave(silence_len, samp.rate = sampling_rate, bit = 16))
+    beat_wave <- if (is.null(beat_wave)) beat else bind(beat_wave, beat)
+  }
+  beat_wave
+}
+```
+
+This function repeats the beat over the full duration of a lemur’s greeting behavior.
+
+-   The `total_duration` sets the length of the final sound.
+
+-   The `interval` controls how often a beat occurs. (I assigned 0.5s intervals for male initiators and 0.4s intervals for female initiators)
+
+-   The `freq` sets the pitch of the beat and uses the same value as the `generate_beat` function.
+
+### Generating ringtones for each initiator
+
+```{r}
+initiators <- unique(df_subset$Initiator)
+
+for (lemur in initiators) {
+  notes <- df_subset %>% filter(Initiator == lemur)
+  if (nrow(notes) == 0) next
+
+  # melody
+  melody <- NULL
+  for (i in 1:nrow(notes)) {
+    note <- generate_note(notes$freq[i], notes$dur[i])
+    melody <- if (is.null(melody)) note else bind(melody, note)
+  }
+
+  # drum
+  sex <- unique(notes$Initiator_Sex)
+  interval <- if (sex == "M") 0.5 else 0.4
+  beat_freq <- if (sex == "M") 180 else 500
+  total_duration <- sum(notes$dur)
+
+  beat_track <- generate_beat_track(total_duration, interval, beat_freq)
+
+  # merge
+  len <- min(length(melody@left), length(beat_track@left))
+  melody@left <- melody@left[1:len]
+  beat_track@left <- beat_track@left[1:len]
+  mix <- melody
+  mix@left <- melody@left + beat_track@left
+
+  # save file
+  file_name <- paste0("ringtones/", lemur, "_ringtone.wav")
+  writeWave(mix, file_name)
+}
+```
+
+**There are some warnings because: the mix\@left (the audio data) is numeric, often with decimal values from operations like sin() or mixing signals. But .wav files only store integers (typically 16-bit signed integers, ranging from -32,768 to 32,767). So tuneR::writeWave() would round the values before saving.**
+
+### Play lemur ringtones!
+
+```{r audio_players, results='asis'}
+for (lemur in unique(df_subset$Initiator)) {
+  cat("### ", lemur, "\n")
+  cat('<audio controls>\n')
+  cat(sprintf('<source src="ringtones/%s_ringtone.wav" type="audio/wav">\n', lemur))
+  cat('Your browser does not support the audio element.\n</audio>\n\n')
+}
+```
+
+### Thank you for listening :)
